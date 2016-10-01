@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"runtime"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -45,7 +46,26 @@ func StatsCommand(bot *bruxism.Bot, service bruxism.Service, message bruxism.Mes
 	fmt.Fprintf(w, "Memory used: \t%s / %s (%s garbage collected)\n", humanize.Bytes(stats.Alloc), humanize.Bytes(stats.Sys), humanize.Bytes(stats.TotalAlloc))
 	fmt.Fprintf(w, "Concurrent tasks: \t%d\n", runtime.NumGoroutine())
 	if service.Name() == bruxism.DiscordServiceName {
+		discord := service.(*bruxism.Discord)
 		fmt.Fprintf(w, "Connected servers: \t%d\n", service.ChannelCount())
+		shards := 0
+		for _, s := range discord.Sessions {
+			if s.DataReady {
+				shards++
+			}
+		}
+		if shards == len(discord.Sessions) {
+			fmt.Fprintf(w, "Shards: \t%d\n", shards)
+		} else {
+			fmt.Fprintf(w, "Shards: \t%d (%d connected)\n", len(discord.Sessions), shards)
+		}
+		guild, err := discord.Channel(message.Channel())
+		if err == nil {
+			id, err := strconv.Atoi(guild.ID)
+			if err == nil {
+				fmt.Fprintf(w, "Current shard: \t%d\n", (id>>22)%len(discord.Sessions))
+			}
+		}
 		fmt.Fprintf(w, "\n```")
 	} else {
 		fmt.Fprintf(w, "Connected channels: \t%d\n", service.ChannelCount())

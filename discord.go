@@ -9,6 +9,9 @@ import (
 	"github.com/iopred/discordgo"
 )
 
+// The number of guilds supported by one shard.
+const numGuildsPerShard = 2400
+
 // DiscordServiceName is the service name for the Discord service.
 const DiscordServiceName string = "Discord"
 
@@ -72,7 +75,11 @@ type Discord struct {
 	args        []interface{}
 	messageChan chan Message
 
+	Shards int
+
+	// The first session, used to send messages (and maintain backwards compatibility).
 	Session             *discordgo.Session
+	Sessions            []*discordgo.Session
 	OwnerUserID         string
 	ApplicationClientID string
 }
@@ -89,7 +96,7 @@ var channelIDRegex = regexp.MustCompile("<#[0-9]*>")
 
 func (d *Discord) replaceChannelNames(message *discordgo.Message) {
 	message.Content = channelIDRegex.ReplaceAllStringFunc(message.Content, func(str string) string {
-		c, err := d.Session.State.Channel(str[2 : len(str)-1])
+		c, err := d.Channel(str[2 : len(str)-1])
 		if err != nil {
 			return str
 		}
@@ -104,12 +111,12 @@ func (d *Discord) replaceRoleNames(message *discordgo.Message) {
 	message.Content = roleIDRegex.ReplaceAllStringFunc(message.Content, func(str string) string {
 		roleID := str[3 : len(str)-1]
 
-		c, err := d.Session.State.Channel(message.ChannelID)
+		c, err := d.Channel(message.ChannelID)
 		if err != nil {
 			return str
 		}
 
-		g, err := d.Session.State.Guild(c.GuildID)
+		g, err := d.Guild(c.GuildID)
 		if err != nil {
 			return str
 		}
@@ -156,18 +163,32 @@ func (d *Discord) Name() string {
 
 // Open opens the service and returns a channel which all messages will be sent on.
 func (d *Discord) Open() (<-chan Message, error) {
-	var err error
-
-	d.Session, err = discordgo.New(d.args...)
-	if err != nil {
-		return nil, err
+	shards := d.Shards
+	if shards < 1 {
+		shards = 1
 	}
 
-	d.Session.AddHandler(d.onMessageCreate)
-	d.Session.AddHandler(d.onMessageUpdate)
-	d.Session.AddHandler(d.onMessageDelete)
+	d.Sessions = make([]*discordgo.Session, shards)
 
-	d.Session.Open()
+	for i := 0; i < shards; i++ {
+		session, err := discordgo.New(d.args...)
+		if err != nil {
+			return nil, err
+		}
+		session.ShardCount = shards
+		session.ShardID = i
+		session.AddHandler(d.onMessageCreate)
+		session.AddHandler(d.onMessageUpdate)
+		session.AddHandler(d.onMessageDelete)
+
+		d.Sessions[i] = session
+	}
+
+	d.Session = d.Sessions[0]
+
+	for i := 0; i < len(d.Sessions); i++ {
+		d.Sessions[i].Open()
+	}
 
 	return d.messageChan, nil
 }
@@ -225,7 +246,7 @@ func (d *Discord) UserName() string {
 // If AlreadyJoinedError is return, @me has already accepted that invite.
 func (d *Discord) Join(join string) error {
 	if i, err := d.Session.Invite(join); err == nil {
-		if _, err := d.Session.State.Guild(i.Guild.ID); err == nil {
+		if _, err := d.Guild(i.Guild.ID); err == nil {
 			return ErrAlreadyJoined
 		}
 	}
@@ -272,17 +293,17 @@ func (d *Discord) IsBotOwner(message Message) bool {
 
 // IsPrivate returns whether or not a message was private.
 func (d *Discord) IsPrivate(message Message) bool {
-	c, err := d.Session.State.PrivateChannel(message.Channel())
+	c, err := d.Channel(message.Channel())
 	return err == nil && c.IsPrivate
 }
 
 // IsModerator returns whether or not the sender of a message is a moderator.
 func (d *Discord) IsModerator(message Message) bool {
-	c, err := d.Session.State.Channel(message.Channel())
+	c, err := d.Channel(message.Channel())
 	if err != nil {
 		return false
 	}
-	g, err := d.Session.State.Guild(c.GuildID)
+	g, err := d.Guild(c.GuildID)
 	if err != nil {
 		return false
 	}
@@ -291,7 +312,7 @@ func (d *Discord) IsModerator(message Message) bool {
 
 // ChannelCount returns the number of channels the bot is in.
 func (d *Discord) ChannelCount() int {
-	return len(d.Session.State.Guilds)
+	return len(d.Guilds())
 }
 
 // SupportsMessageHistory returns if the service supports message history.
@@ -301,7 +322,7 @@ func (d *Discord) SupportsMessageHistory() bool {
 
 // MessageHistory returns the message history for a channel.
 func (d *Discord) MessageHistory(channel string) []Message {
-	c, err := d.Session.State.Channel(channel)
+	c, err := d.Channel(channel)
 	if err != nil {
 		return nil
 	}
@@ -312,4 +333,42 @@ func (d *Discord) MessageHistory(channel string) []Message {
 	}
 
 	return messages
+}
+
+func (d *Discord) Channel(channelID string) (channel *discordgo.Channel, err error) {
+	for _, s := range d.Sessions {
+		channel, err = s.State.Channel(channelID)
+		if err == nil {
+			return channel, nil
+		}
+	}
+	return
+}
+
+func (d *Discord) Guild(guildID string) (guild *discordgo.Guild, err error) {
+	for _, s := range d.Sessions {
+		guild, err = s.State.Guild(guildID)
+		if err == nil {
+			return guild, nil
+		}
+	}
+	return
+}
+
+func (d *Discord) Guilds() []*discordgo.Guild {
+	guilds := []*discordgo.Guild{}
+	for _, s := range d.Sessions {
+		guilds = append(guilds, s.State.Guilds...)
+	}
+	return guilds
+}
+
+func (d *Discord) UserChannelPermissions(userID, channelID string) (apermissions int, err error) {
+	for _, s := range d.Sessions {
+		apermissions, err = s.State.UserChannelPermissions(userID, channelID)
+		if err == nil {
+			return apermissions, nil
+		}
+	}
+	return
 }

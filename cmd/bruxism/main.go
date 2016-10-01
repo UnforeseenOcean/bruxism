@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"log"
 	"math/rand"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 	"github.com/iopred/bruxism/discordavatarplugin"
 	"github.com/iopred/bruxism/emojiplugin"
 	"github.com/iopred/bruxism/inviteplugin"
+	"github.com/iopred/bruxism/liveplugin"
 	"github.com/iopred/bruxism/numbertriviaplugin"
 	"github.com/iopred/bruxism/playedplugin"
 	"github.com/iopred/bruxism/playingplugin"
@@ -36,6 +38,7 @@ var discordEmail string
 var discordPassword string
 var discordApplicationClientID string
 var discordOwnerUserID string
+var discordShards int
 var ircServer string
 var ircUsername string
 var ircPassword string
@@ -58,6 +61,7 @@ func init() {
 	flag.StringVar(&discordPassword, "discordpassword", "", "Discord account password.")
 	flag.StringVar(&discordOwnerUserID, "discordowneruserid", "", "Discord owner user id.")
 	flag.StringVar(&discordApplicationClientID, "discordapplicationclientid", "", "Discord application client id.")
+	flag.IntVar(&discordShards, "discordshards", 1, "Number of discord shards.")
 	flag.StringVar(&ircServer, "ircserver", "", "IRC server.")
 	flag.StringVar(&ircUsername, "ircusername", "", "IRC user name.")
 	flag.StringVar(&ircPassword, "ircpassword", "", "IRC password.")
@@ -94,6 +98,13 @@ func main() {
 	ytip := youtubeinviteplugin.New()
 
 	youtube := bruxism.NewYouTube(youtubeURL, youtubeAuth, youtubeConfigFilename, youtubeTokenFilename, youtubeLiveVideoIDs)
+	err := youtube.Init()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ytLiveChannel := bruxism.NewYTLiveChannel(youtube.Service)
+
 	bot.RegisterService(youtube)
 
 	bot.RegisterPlugin(youtube, cp)
@@ -102,6 +113,7 @@ func main() {
 	bot.RegisterPlugin(youtube, streamerplugin.New(youtube))
 	bot.RegisterPlugin(youtube, reminderplugin.New())
 	bot.RegisterPlugin(youtube, triviaplugin.New())
+	bot.RegisterPlugin(youtube, liveplugin.New(ytLiveChannel))
 
 	// Register the Discord service if we have an email or token.
 	if (discordEmail != "" && discordPassword != "") || discordToken != "" {
@@ -113,6 +125,7 @@ func main() {
 		}
 		discord.ApplicationClientID = discordApplicationClientID
 		discord.OwnerUserID = discordOwnerUserID
+		discord.Shards = discordShards
 		bot.RegisterService(discord)
 
 		bot.RegisterPlugin(discord, cp)
@@ -123,6 +136,7 @@ func main() {
 		bot.RegisterPlugin(discord, directmessageinviteplugin.New())
 		bot.RegisterPlugin(discord, reminderplugin.New())
 		bot.RegisterPlugin(discord, emojiplugin.New())
+		bot.RegisterPlugin(discord, liveplugin.New(ytLiveChannel))
 		bot.RegisterPlugin(discord, discordavatarplugin.New())
 		if carbonitexKey != "" {
 			bot.RegisterPlugin(discord, carbonitexplugin.New(carbonitexKey))
@@ -141,6 +155,7 @@ func main() {
 		bot.RegisterPlugin(irc, streamerplugin.New(youtube))
 		bot.RegisterPlugin(irc, reminderplugin.New())
 		bot.RegisterPlugin(irc, triviaplugin.New())
+		bot.RegisterPlugin(irc, liveplugin.New(ytLiveChannel))
 		bot.RegisterPlugin(irc, ytip)
 	}
 
@@ -153,6 +168,7 @@ func main() {
 		bot.RegisterPlugin(slack, topstreamersplugin.New(youtube))
 		bot.RegisterPlugin(slack, streamerplugin.New(youtube))
 		bot.RegisterPlugin(slack, triviaplugin.New())
+		bot.RegisterPlugin(slack, liveplugin.New(ytLiveChannel))
 		bot.RegisterPlugin(slack, ytip)
 	}
 
