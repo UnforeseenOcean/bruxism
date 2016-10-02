@@ -180,7 +180,7 @@ func (d *Discord) Open() (<-chan Message, error) {
 		session.AddHandler(d.onMessageCreate)
 		session.AddHandler(d.onMessageUpdate)
 		session.AddHandler(d.onMessageDelete)
-
+		session.LogLevel = discordgo.LogDebug
 		d.Sessions[i] = session
 	}
 
