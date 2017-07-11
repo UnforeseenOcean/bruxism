@@ -10,27 +10,38 @@ import (
 
 var userIDRegex = regexp.MustCompile("<@!?([0-9]*)>")
 
-func avatarMessageFunc(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message) {
-	if service.Name() == bruxism.DiscordServiceName && !service.IsMe(message) {
-		if bruxism.MatchesCommand(service, "avatar", message) {
-			query := strings.Join(strings.Split(message.RawMessage(), " ")[1:], " ")
-
-			id := message.UserID()
-			match := userIDRegex.FindStringSubmatch(query)
-			if match != nil {
-				id = match[1]
-			}
-
-			discord := service.(*bruxism.Discord)
-
-			u, err := discord.Session.User(id)
-			if err != nil {
-				return
-			}
-
-			service.SendMessage(message.Channel(), discordgo.EndpointUserAvatar(u.ID, u.Avatar))
-		}
+func avatarLoadFunc(bot *bruxism.Bot, service bruxism.Service, data []byte) error {
+	if service.Name() != bruxism.DiscordServiceName {
+		panic("DiscordAvatar plugin only supports Discord.")
 	}
+	return nil
+}
+
+func avatarMessageFunc(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message) {
+	if service.IsMe(message) {
+		return
+	}
+
+	if !bruxism.MatchesCommand(service, "avatar", message) {
+		return
+	}
+
+	query := strings.Join(strings.Split(message.RawMessage(), " ")[1:], " ")
+
+	id := message.UserID()
+	match := userIDRegex.FindStringSubmatch(query)
+	if match != nil {
+		id = match[1]
+	}
+
+	discord := service.(*bruxism.Discord)
+
+	u, err := discord.Session.User(id)
+	if err != nil {
+		return
+	}
+
+	service.SendMessage(message.Channel(), discordgo.EndpointUserAvatar(u.ID, u.Avatar))
 }
 
 func avatarHelpFunc(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message, detailed bool) []string {
@@ -42,7 +53,8 @@ func avatarHelpFunc(bot *bruxism.Bot, service bruxism.Service, message bruxism.M
 
 // New creates a new discordavatar plugin.
 func New() bruxism.Plugin {
-	p := bruxism.NewSimplePlugin("discordavatar")
+	p := bruxism.NewSimplePlugin("DiscordAvatar")
+	p.LoadFunc = avatarLoadFunc
 	p.MessageFunc = avatarMessageFunc
 	p.HelpFunc = avatarHelpFunc
 	return p

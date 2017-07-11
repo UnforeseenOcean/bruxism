@@ -106,11 +106,6 @@ func (s *Slack) Name() string {
 func (s *Slack) Open() (<-chan Message, error) {
 	s.Client = slack.New(s.token)
 
-	users, _ := s.Client.GetUsers()
-	for _, u := range users {
-		fmt.Println(u)
-	}
-
 	var err error
 	s.Me, err = s.Client.AuthTest()
 	if err != nil {
@@ -133,6 +128,11 @@ func (s *Slack) IsMe(message Message) bool {
 func (s *Slack) SendMessage(channel, message string) error {
 	s.RTM.SendMessage(s.RTM.NewOutgoingMessage(message, channel))
 	return nil
+}
+
+// SendAction sends an action.
+func (s *Slack) SendAction(channel, message string) error {
+	return s.SendMessage(channel, message)
 }
 
 // DeleteMessage deletes a message.
@@ -158,6 +158,11 @@ func (s *Slack) UnbanUser(channel, userID string) error {
 // UserName returns the bots name.
 func (s *Slack) UserName() string {
 	return s.Me.User
+}
+
+// UserID returns the bots user id.
+func (s *Slack) UserID() string {
+	return s.Me.UserID
 }
 
 // Join accept an invite or return an error.
@@ -200,6 +205,11 @@ func (s *Slack) IsBotOwner(message Message) bool {
 
 // IsPrivate returns whether or not a message was private.
 func (s *Slack) IsPrivate(message Message) bool {
+	return false
+}
+
+// IsChannelOwner returns whether or not the sender of a message is the owner.
+func (s *Slack) IsChannelOwner(message Message) bool {
 	return false
 }
 

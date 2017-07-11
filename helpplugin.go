@@ -12,12 +12,14 @@ type helpPlugin struct {
 	Private map[string]bool
 }
 
+// Name returns the name of the service.
 func (p *helpPlugin) Name() string {
 	return "Help"
 }
 
+// Help returns a list of help strings that are printed when the user requests them.
 func (p *helpPlugin) Help(bot *Bot, service Service, message Message, detailed bool) []string {
-	privs := service.SupportsPrivateMessages() && !service.IsPrivate(message) && (service.IsBotOwner(message) || service.IsModerator(message))
+	privs := service.SupportsPrivateMessages() && !service.IsPrivate(message) && service.IsModerator(message)
 	if detailed && !privs {
 		return nil
 	}
@@ -47,7 +49,7 @@ func (p *helpPlugin) Help(bot *Bot, service Service, message Message, detailed b
 	sort.Strings(commands)
 
 	help := []string{}
-	
+
 	if len(commands) > 0 {
 		help = append(help, CommandHelp(service, "help", "[topic]", fmt.Sprintf("Returns help for a specific topic. Available topics: %s%s%s", ticks, strings.Join(commands, ", "), ticks))[0])
 	}
@@ -120,7 +122,7 @@ func (p *helpPlugin) Message(bot *Bot, service Service, message Message) {
 				}
 			}
 		} else if MatchesCommand(service, "setprivatehelp", message) && service.SupportsPrivateMessages() && !service.IsPrivate(message) {
-			if !service.IsBotOwner(message) && !service.IsModerator(message) {
+			if !service.IsModerator(message) {
 				return
 			}
 
@@ -128,7 +130,7 @@ func (p *helpPlugin) Message(bot *Bot, service Service, message Message) {
 
 			service.PrivateMessage(message.UserID(), fmt.Sprintf("Help text in <#%s> will be sent through private messages.", message.Channel()))
 		} else if MatchesCommand(service, "setpublichelp", message) && service.SupportsPrivateMessages() && !service.IsPrivate(message) {
-			if !service.IsBotOwner(message) && !service.IsModerator(message) {
+			if !service.IsModerator(message) {
 				return
 			}
 
@@ -152,6 +154,11 @@ func (p *helpPlugin) Load(bot *Bot, service Service, data []byte) error {
 // Save will save plugin state to a byte array.
 func (p *helpPlugin) Save() ([]byte, error) {
 	return json.Marshal(p)
+}
+
+// Stats will return the stats for a plugin.
+func (p *helpPlugin) Stats(bot *Bot, service Service, message Message) []string {
+	return nil
 }
 
 // NeHelpPlugin will create a new help plugin.

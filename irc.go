@@ -122,6 +122,12 @@ func (i *IRC) SendMessage(channel, message string) error {
 	return nil
 }
 
+// SendAction sends an action.
+func (i *IRC) SendAction(channel, message string) error {
+	i.Conn.Action(channel, message)
+	return nil
+}
+
 // DeleteMessage deletes a message.
 func (i *IRC) DeleteMessage(channel, messageID string) error {
 	return errors.New("Deleting messages not supported on IRC.")
@@ -145,6 +151,11 @@ func (i *IRC) UnbanUser(channel, userID string) error {
 
 // UserName returns the bots name.
 func (i *IRC) UserName() string {
+	return i.Conn.Me().Nick
+}
+
+// UserID returns the bots user id.
+func (i *IRC) UserID() string {
 	return i.Conn.Me().Nick
 }
 
@@ -187,6 +198,11 @@ func (i *IRC) IsBotOwner(message Message) bool {
 // IsPrivate returns whether or not a message was private.
 func (i *IRC) IsPrivate(message Message) bool {
 	return message.UserName() == message.Channel()
+}
+
+// IsChannelOwner returns whether or not the sender of a message is the owner.
+func (i *IRC) IsChannelOwner(message Message) bool {
+	return false
 }
 
 // IsModerator returns whether or not the sender of a message is a moderator.

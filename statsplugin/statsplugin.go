@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -48,43 +49,68 @@ func StatsCommand(bot *bruxism.Bot, service bruxism.Service, message bruxism.Mes
 	if service.Name() == bruxism.DiscordServiceName {
 		discord := service.(*bruxism.Discord)
 		fmt.Fprintf(w, "Connected servers: \t%d\n", service.ChannelCount())
-		shards := 0
-		for _, s := range discord.Sessions {
-			if s.DataReady {
-				shards++
+		if len(discord.Sessions) > 1 {
+			shards := 0
+			for _, s := range discord.Sessions {
+				if s.DataReady {
+					shards++
+				}
 			}
-		}
-		if shards == len(discord.Sessions) {
-			fmt.Fprintf(w, "Shards: \t%d\n", shards)
-		} else {
-			fmt.Fprintf(w, "Shards: \t%d (%d connected)\n", len(discord.Sessions), shards)
-		}
-		guild, err := discord.Channel(message.Channel())
-		if err == nil {
-			id, err := strconv.Atoi(guild.ID)
+			if shards == len(discord.Sessions) {
+				fmt.Fprintf(w, "Shards: \t%d\n", shards)
+			} else {
+				fmt.Fprintf(w, "Shards: \t%d (%d connected)\n", len(discord.Sessions), shards)
+			}
+			guild, err := discord.Channel(message.Channel())
 			if err == nil {
-				fmt.Fprintf(w, "Current shard: \t%d\n", (id>>22)%len(discord.Sessions))
+				id, err := strconv.Atoi(guild.ID)
+				if err == nil {
+					fmt.Fprintf(w, "Current shard: \t%d\n", ((id>>22)%len(discord.Sessions) + 1))
+				}
 			}
 		}
-		fmt.Fprintf(w, "\n```")
 	} else {
 		fmt.Fprintf(w, "Connected channels: \t%d\n", service.ChannelCount())
 	}
-	w.Flush()
 
-	out := buf.String() + "\nBuilt with love by iopred."
+	plugins := bot.Services[service.Name()].Plugins
+	names := []string{}
+	for _, plugin := range plugins {
+		names = append(names, plugin.Name())
+		sort.Strings(names)
+	}
 
-	if service.SupportsMultiline() {
-		service.SendMessage(message.Channel(), out)
-	} else {
-		lines := strings.Split(out, "\n")
-		for _, line := range lines {
-			if err := service.SendMessage(message.Channel(), line); err != nil {
-				break
-			}
+	for _, name := range names {
+		stats := plugins[name].Stats(bot, service, message)
+		for _, stat := range stats {
+			fmt.Fprint(w, stat)
 		}
 	}
+
+	if service.Name() == bruxism.DiscordServiceName {
+		fmt.Fprintf(w, "\n```")
+	}
+
+	w.Flush()
+	out := buf.String()
+
+	end := ""
+	if IsSeptapus {
+		end += "Septapus community: <https://discord.gg/HWN9pwj>\nPatreon: <https://www.patreon.com/iopred>\nBuilt with love by iopred."
+	}
+
+	if service.SupportsMultiline() {
+		if end != "" {
+			out += "\n" + end
+		}
+		service.SendMessage(message.Channel(), out)
+	} else {
+		service.SendMessage(message.Channel(), strings.Join(strings.Split(out, "\n"), " "))
+		service.SendMessage(message.Channel(), strings.Join(strings.Split(end, "\n"), " "))
+	}
 }
+
+var IsSeptapus bool = false
 
 // StatsHelp is the help for the stats command.
 var StatsHelp = bruxism.NewCommandHelp("", "Lists bot statistics.")

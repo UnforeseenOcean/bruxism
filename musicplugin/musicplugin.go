@@ -31,12 +31,10 @@ type voiceConnection struct {
 	sync.Mutex
 	debug bool
 
-	GuildID         string
-	ChannelID       string
-	LoopQueue       bool
-	AnnounceChannel string
-	MaxQueueSize    int
-	Queue           []song
+	GuildID      string
+	ChannelID    string
+	MaxQueueSize int
+	Queue        []song
 
 	close   chan struct{}
 	control chan controlMessage
@@ -130,6 +128,9 @@ func (p *MusicPlugin) Save() ([]byte, error) {
 
 // Help returns a list of help strings that are printed when the user requests them.
 func (p *MusicPlugin) Help(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message, detailed bool) []string {
+	if service.IsPrivate(message) {
+		return nil
+	}
 
 	// Only show help messages for guilds where we have a voice connection
 	c, err := p.discord.Channel(message.Channel())
@@ -158,7 +159,6 @@ func (p *MusicPlugin) Help(bot *bruxism.Bot, service bruxism.Service, message br
 			bruxism.CommandHelp(service, "music", "resume", "Resume playback of current song.")[0],
 			bruxism.CommandHelp(service, "music", "skip", "Skip current song.")[0],
 			bruxism.CommandHelp(service, "music", "stop", "Stop playing music.")[0],
-			bruxism.CommandHelp(service, "music", "loop", "Toggle 'Loop Queue' setting.")[0],
 			bruxism.CommandHelp(service, "music", "list", "List contents of queue.")[0],
 			bruxism.CommandHelp(service, "music", "clear", "Clear all items from queue.")[0],
 		}...)
@@ -176,6 +176,11 @@ func (p *MusicPlugin) Message(bot *bruxism.Bot, service bruxism.Service, message
 	}
 
 	if !bruxism.MatchesCommand(service, "music", message) && !bruxism.MatchesCommand(service, "mu", message) {
+		return
+	}
+
+	if service.IsPrivate(message) {
+		service.SendMessage(message.Channel(), "Sorry, this command doesn't work in private chat.")
 		return
 	}
 
@@ -269,18 +274,6 @@ func (p *MusicPlugin) Message(bot *bruxism.Bot, service bruxism.Service, message
 		service.SendMessage(message.Channel(), fmt.Sprintf("debug mode set to %v", vc.debug))
 		vc.Unlock()
 
-	case "loop":
-		// enable or disable looping the queue
-
-		if !vcok {
-			service.SendMessage(message.Channel(), fmt.Sprintf("There is no voice connection for this Guild."))
-		}
-
-		vc.Lock()
-		vc.LoopQueue = !vc.LoopQueue
-		service.SendMessage(message.Channel(), fmt.Sprintf("Queue loop set to %v", vc.LoopQueue))
-		vc.Unlock()
-
 	case "play":
 		// Start queue player and optionally enqueue provided songs
 
@@ -338,9 +331,7 @@ func (p *MusicPlugin) Message(bot *bruxism.Bot, service bruxism.Service, message
 
 		msg := fmt.Sprintf("`Bruxism MusicPlugin:`\n")
 		msg += fmt.Sprintf("`Voice Channel:` %s\n", vc.ChannelID)
-		//    msg += fmt.Sprintf("`Announce Channel:` %s\n", vc.AnnounceChannel) // TODO
 		msg += fmt.Sprintf("`Queue Size:` %d\n", len(vc.Queue))
-		msg += fmt.Sprintf("`Loop Queue:` %v\n", vc.LoopQueue)
 
 		if vc.playing == nil {
 			service.SendMessage(message.Channel(), msg)
@@ -504,12 +495,6 @@ func (p *MusicPlugin) enqueue(vc *voiceConnection, url string, service bruxism.S
 
 		s.AddedBy = message.UserName()
 
-		if len(vc.Queue) == 0 {
-			service.SendMessage(message.Channel(), fmt.Sprintf("Playing %s.", s.Title))
-		} else {
-			service.SendMessage(message.Channel(), fmt.Sprintf("Queueing %s.", s.Title))
-		}
-
 		vc.Lock()
 		vc.Queue = append(vc.Queue, s)
 		vc.Unlock()
@@ -588,19 +573,11 @@ func (p *MusicPlugin) start(vc *voiceConnection, close <-chan struct{}, control 
 		p.play(vc, close, control, Song)
 		vc.playing = nil
 
-		if vc.LoopQueue {
-			if i+2 > len(vc.Queue) {
-				i = 0
-			} else {
-				i++
-			}
-		} else {
-			vc.Lock()
-			if len(vc.Queue) > 0 {
-				vc.Queue = append(vc.Queue[:i], vc.Queue[i+1:]...)
-			}
-			vc.Unlock()
+		vc.Lock()
+		if len(vc.Queue) > 0 {
+			vc.Queue = append(vc.Queue[:i], vc.Queue[i+1:]...)
 		}
+		vc.Unlock()
 	}
 }
 
@@ -757,4 +734,9 @@ func (p *MusicPlugin) play(vc *voiceConnection, close <-chan struct{}, control <
 		vc.playing.Remaining = (vc.playing.Duration - int(time.Since(start).Seconds()))
 
 	}
+}
+
+// Stats will return the stats for a plugin.
+func (p *MusicPlugin) Stats(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message) []string {
+	return nil
 }

@@ -28,9 +28,9 @@ type Reminder struct {
 // ReminderPlugin is a plugin that reminds users.
 type ReminderPlugin struct {
 	sync.RWMutex
-	bruxism.SimplePlugin
-	bot       *bruxism.Bot
-	Reminders []*Reminder
+	bot            *bruxism.Bot
+	Reminders      []*Reminder
+	TotalReminders int
 }
 
 var randomTimes = []string{
@@ -63,7 +63,8 @@ func (p *ReminderPlugin) randomReminder(service bruxism.Service) string {
 	return fmt.Sprintf("%s%sreminder %s %s%s", ticks, service.CommandPrefix(), p.random(randomTimes), p.random(randomMessages), ticks)
 }
 
-func (p *ReminderPlugin) helpFunc(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message, detailed bool) []string {
+// Help returns a list of help strings that are printed when the user requests them.
+func (p *ReminderPlugin) Help(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message, detailed bool) []string {
 	help := []string{
 		bruxism.CommandHelp(service, "reminder", "<time> <reminder>", "Sets a reminder that is sent after the provided time.")[0],
 	}
@@ -146,55 +147,62 @@ func (p *ReminderPlugin) AddReminder(reminder *Reminder) error {
 	p.Reminders = append(p.Reminders, reminder)
 	copy(p.Reminders[i+1:], p.Reminders[i:])
 	p.Reminders[i] = reminder
+	p.TotalReminders++
 
 	return nil
 }
 
-func (p *ReminderPlugin) messageFunc(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message) {
-	if !service.IsMe(message) {
-		if bruxism.MatchesCommand(service, "remind", message) || bruxism.MatchesCommand(service, "reminder", message) {
-			_, parts := bruxism.ParseCommand(service, message)
+func (p *ReminderPlugin) Message(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message) {
+	defer bruxism.MessageRecover()
 
-			if len(parts) < 2 {
-				service.SendMessage(message.Channel(), fmt.Sprintf("Invalid reminder, no time or message. eg: %s", p.randomReminder(service)))
-				return
-			}
-
-			t, r, err := p.parseReminder(parts)
-
-			now := time.Now()
-
-			if err != nil || t.Before(now) || t.After(now.Add(time.Hour*24*365+time.Hour)) {
-				service.SendMessage(message.Channel(), fmt.Sprintf("Invalid time. eg: %s", strings.Join(randomTimes, ", ")))
-				return
-			}
-
-			if r == "" {
-				service.SendMessage(message.Channel(), fmt.Sprintf("Invalid reminder, no message. eg: %s", p.randomReminder(service)))
-				return
-			}
-
-			requester := message.UserName()
-			if service.Name() == bruxism.DiscordServiceName {
-				requester = fmt.Sprintf("<@%s>", message.UserID())
-			}
-
-			err = p.AddReminder(&Reminder{
-				StartTime: now,
-				Time:      t,
-				Requester: requester,
-				Target:    message.Channel(),
-				Message:   r,
-				IsPrivate: service.IsPrivate(message),
-			})
-			if err != nil {
-				service.SendMessage(message.Channel(), err.Error())
-				return
-			}
-
-			service.SendMessage(message.Channel(), fmt.Sprintf("Reminder set for %s.", humanize.Time(t)))
-		}
+	if service.IsMe(message) {
+		return
 	}
+
+	if !bruxism.MatchesCommand(service, "remind", message) && !bruxism.MatchesCommand(service, "reminder", message) {
+		return
+	}
+
+	_, parts := bruxism.ParseCommand(service, message)
+
+	if len(parts) < 2 {
+		service.SendMessage(message.Channel(), fmt.Sprintf("Invalid reminder, no time or message. eg: %s", p.randomReminder(service)))
+		return
+	}
+
+	t, r, err := p.parseReminder(parts)
+
+	now := time.Now()
+
+	if err != nil || t.Before(now) || t.After(now.Add(time.Hour*24*365+time.Hour)) {
+		service.SendMessage(message.Channel(), fmt.Sprintf("Invalid time. eg: %s", strings.Join(randomTimes, ", ")))
+		return
+	}
+
+	if r == "" {
+		service.SendMessage(message.Channel(), fmt.Sprintf("Invalid reminder, no message. eg: %s", p.randomReminder(service)))
+		return
+	}
+
+	requester := message.UserName()
+	if service.Name() == bruxism.DiscordServiceName {
+		requester = fmt.Sprintf("<@%s>", message.UserID())
+	}
+
+	err = p.AddReminder(&Reminder{
+		StartTime: now,
+		Time:      t,
+		Requester: requester,
+		Target:    message.Channel(),
+		Message:   r,
+		IsPrivate: service.IsPrivate(message),
+	})
+	if err != nil {
+		service.SendMessage(message.Channel(), err.Error())
+		return
+	}
+
+	service.SendMessage(message.Channel(), fmt.Sprintf("Reminder set for %s.", humanize.Time(t)))
 }
 
 // SendReminder sends a reminder.
@@ -238,6 +246,10 @@ func (p *ReminderPlugin) Load(bot *bruxism.Bot, service bruxism.Service, data []
 			log.Println("Error loading data", err)
 		}
 	}
+	if len(p.Reminders) > p.TotalReminders {
+		p.TotalReminders = len(p.Reminders)
+	}
+
 	go p.Run(bot, service)
 	return nil
 }
@@ -247,13 +259,19 @@ func (p *ReminderPlugin) Save() ([]byte, error) {
 	return json.Marshal(p)
 }
 
+// Stats will return the stats for a plugin.
+func (p *ReminderPlugin) Stats(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message) []string {
+	return []string{fmt.Sprintf("Reminders: \t%d\n", p.TotalReminders)}
+}
+
+// Name returns the name of the plugin.
+func (p *ReminderPlugin) Name() string {
+	return "Reminder"
+}
+
 // New will create a new Reminder plugin.
 func New() bruxism.Plugin {
-	p := &ReminderPlugin{
-		SimplePlugin: *bruxism.NewSimplePlugin("Reminder"),
-		Reminders:    []*Reminder{},
+	return &ReminderPlugin{
+		Reminders: []*Reminder{},
 	}
-	p.MessageFunc = p.messageFunc
-	p.HelpFunc = p.helpFunc
-	return p
 }

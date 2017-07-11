@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/atotto/clipboard"
@@ -34,6 +33,10 @@ const (
 const (
 	LiveChatBanSnippetTypeTemporary string = "temporary"
 	LiveChatBanSnippetTypePermanent        = "permanent"
+)
+
+const (
+	LiveChatEndedEvent string = "chatEndedEvent"
 )
 
 // LiveChatMessage is a Message wrapper around youtube.LiveChatMessage.
@@ -87,133 +90,136 @@ func (m *LiveChatMessage) Type() MessageType {
 	return MessageTypeCreate
 }
 
-type fanFunding struct {
-	sync.Mutex
-	Messages map[string]*youtube.LiveChatMessage
-}
-
 // YouTube is a Service provider for YouTube.
 type YouTube struct {
-	url            bool
-	auth           string
-	configFilename string
-	tokenFilename  string
-	liveVideoIDs   string
-	config         *oauth2.Config
-	token          *oauth2.Token
-	Client         *http.Client
-	Service        *youtube.Service
-	messageChan    chan Message
-	InsertChan     chan interface{}
-	DeleteChan     chan interface{}
-	fanFunding     fanFunding
-	me             *youtube.Channel
-	channelCount   int
-	joined         map[string]bool
+	url                bool
+	auth               string
+	configFilename     string
+	tokenFilename      string
+	config             *oauth2.Config
+	token              *oauth2.Token
+	Client             *http.Client
+	Service            *youtube.Service
+	messageChan        chan Message
+	InsertChan         chan interface{}
+	DeleteChan         chan interface{}
+	me                 *youtube.Channel
+	channelCount       int
+	joined             map[string]string
+	chatToVideo        map[string]string
+	videoToChat        map[string]string
+	videoToChannel     map[string]string
+	videoToChannelName map[string]string
 }
 
 // NewYouTube creates a new YouTube service.
-func NewYouTube(url bool, auth, configFilename, tokenFilename, liveVideoIDs string) *YouTube {
+func NewYouTube(url bool, auth, configFilename, tokenFilename string) *YouTube {
 	return &YouTube{
-		url:            url,
-		auth:           auth,
-		configFilename: configFilename,
-		tokenFilename:  tokenFilename,
-		liveVideoIDs:   liveVideoIDs,
-		messageChan:    make(chan Message, 200),
-		InsertChan:     make(chan interface{}, 200),
-		DeleteChan:     make(chan interface{}, 200),
-		fanFunding:     fanFunding{Messages: make(map[string]*youtube.LiveChatMessage)},
-		joined:         make(map[string]bool),
+		url:                url,
+		auth:               auth,
+		configFilename:     configFilename,
+		tokenFilename:      tokenFilename,
+		messageChan:        make(chan Message, 200),
+		InsertChan:         make(chan interface{}, 200),
+		DeleteChan:         make(chan interface{}, 200),
+		joined:             make(map[string]string),
+		chatToVideo:        map[string]string{},
+		videoToChat:        map[string]string{},
+		videoToChannel:     map[string]string{},
+		videoToChannelName: map[string]string{},
 	}
 }
 
-func (yt *YouTube) pollBroadcasts(broadcasts *youtube.LiveBroadcastListResponse, err error) {
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	for _, broadcast := range broadcasts.Items {
-		// If the broadcast has ended, it can't have a valid chat.
-		if broadcast.Status != nil && broadcast.Status.LifeCycleStatus == "complete" {
-			continue
-		}
-
-		go yt.pollMessages(broadcast)
-	}
+// JoinVideo joins a Video and monitors it for messages on the default message channel.
+func (yt *YouTube) JoinVideo(video *youtube.Video) error {
+	return yt.joinVideo(video, yt.messageChan)
 }
 
-func (yt *YouTube) pollMessages(broadcast *youtube.LiveBroadcast) {
-	if yt.joined[broadcast.Snippet.LiveChatId] {
-		return
+func (yt *YouTube) joinVideo(video *youtube.Video, messageChan chan Message) error {
+	videoID := video.Id
+
+	if yt.joined[videoID] != "" {
+		return ErrAlreadyJoined
 	}
-	yt.joined[broadcast.Snippet.LiveChatId] = true
 
-	yt.channelCount++
-	pageToken := ""
-	for {
-		list := yt.Service.LiveChatMessages.List(broadcast.Snippet.LiveChatId, "id,snippet,authorDetails").MaxResults(200)
-		if pageToken != "" {
-			list.PageToken(pageToken)
+	if video == nil || video.Snippet == nil || video.LiveStreamingDetails == nil || video.LiveStreamingDetails.ActiveLiveChatId == "" {
+		return errors.New("Invalid video")
+	}
+
+	chat := video.LiveStreamingDetails.ActiveLiveChatId
+
+	// If we already have joined this chat, make sure to clear up the old insteance.
+	// This can happen with streamnow.
+	if yt.chatToVideo[chat] != "" {
+		if yt.joined[yt.chatToVideo[chat]] != "" {
+			delete(yt.joined, yt.chatToVideo[chat])
 		}
+	}
 
-		liveChatMessageListResponse, err := list.Do()
+	yt.joined[videoID] = chat
+	yt.chatToVideo[chat] = videoID
+	yt.videoToChat[videoID] = chat
+	yt.videoToChannel[videoID] = video.Snippet.ChannelId
+	yt.videoToChannelName[videoID] = video.Snippet.ChannelTitle
 
-		if err != nil {
-			log.Println(err)
-		} else {
-			// Ignore the first results, we only want new chats.
+	go func() {
+		defer func() {
+			delete(yt.joined, videoID)
+			if messageChan != yt.messageChan {
+				close(messageChan)
+			}
+		}()
+
+		errors := 0
+
+		yt.channelCount++
+		pageToken := ""
+		for {
+			// We have been asked to leave.
+			if yt.joined[videoID] == "" {
+				return
+			}
+
+			list := yt.Service.LiveChatMessages.List(chat, "id,snippet,authorDetails").MaxResults(200)
 			if pageToken != "" {
-				for _, message := range liveChatMessageListResponse.Items {
-					liveChatMessage := LiveChatMessage(*message)
-					yt.messageChan <- &liveChatMessage
+				list.PageToken(pageToken)
+			}
 
-					switch message.Snippet.Type {
-					case LiveChatMessageSnippetTypeFanFunding:
-						yt.addFanFundingMessage(message)
+			liveChatMessageListResponse, err := list.Do()
+
+			if err != nil {
+				errors++
+				if errors > 10 {
+					return
+				}
+			} else {
+				errors = 0
+				// Ignore the first results, we only want new chats.
+				if pageToken != "" {
+					for _, message := range liveChatMessageListResponse.Items {
+						// Use video IDs internally.
+						message.Snippet.LiveChatId = videoID
+						liveChatMessage := LiveChatMessage(*message)
+						messageChan <- &liveChatMessage
+
+						switch message.Snippet.Type {
+						case LiveChatEndedEvent:
+							return
+						}
 					}
 				}
+				pageToken = liveChatMessageListResponse.NextPageToken
 			}
-			pageToken = liveChatMessageListResponse.NextPageToken
+
+			if liveChatMessageListResponse != nil && liveChatMessageListResponse.PollingIntervalMillis != 0 {
+				time.Sleep(time.Duration(liveChatMessageListResponse.PollingIntervalMillis) * time.Millisecond)
+			} else {
+				time.Sleep(10 * time.Second)
+			}
 		}
+	}()
 
-		if liveChatMessageListResponse != nil && liveChatMessageListResponse.PollingIntervalMillis != 0 {
-			time.Sleep(time.Duration(liveChatMessageListResponse.PollingIntervalMillis) * time.Millisecond)
-		} else {
-			time.Sleep(10 * time.Second)
-		}
-	}
-}
-
-func (yt *YouTube) writeMessagesToFile(messages []*youtube.LiveChatMessage, filename string) {
-	output := ""
-	for _, message := range messages {
-		output += html.UnescapeString(message.Snippet.DisplayMessage) + "\n"
-	}
-	err := ioutil.WriteFile(filename, []byte(output), 0777)
-	if err != nil {
-		log.Println(err)
-	}
-}
-
-func (yt *YouTube) addFanFundingMessage(message *youtube.LiveChatMessage) {
-	yt.fanFunding.Lock()
-	defer yt.fanFunding.Unlock()
-
-	if yt.fanFunding.Messages[message.Id] == nil {
-		yt.fanFunding.Messages[message.Id] = message
-		yt.writeMessagesToFile([]*youtube.LiveChatMessage{message}, "youtubelatest.txt")
-	}
-
-	largest := message
-	for _, check := range yt.fanFunding.Messages {
-		if check.Snippet.FanFundingEventDetails.AmountMicros > largest.Snippet.FanFundingEventDetails.AmountMicros {
-			largest = check
-		}
-	}
-
-	yt.writeMessagesToFile([]*youtube.LiveChatMessage{largest}, "youtubelargest.txt")
+	return nil
 }
 
 func (yt *YouTube) generateOauthURLAndExit() {
@@ -306,6 +312,9 @@ func (yt *YouTube) handleRequests() {
 		case request := <-yt.InsertChan:
 			switch request := request.(type) {
 			case *youtube.LiveChatMessage:
+				// Internally we use video ids as the channel, map back to a chat id.
+				request.Snippet.LiveChatId = yt.videoToChat[request.Snippet.LiveChatId]
+
 				insertLiveChatMessageLimited(request)
 			case *youtube.LiveChatBan:
 				yt.Service.LiveChatBans.Insert("snippet", request).Do()
@@ -364,13 +373,10 @@ func (yt *YouTube) Open() (<-chan Message, error) {
 	}
 	yt.me = me
 
-	yt.pollBroadcasts(yt.Service.LiveBroadcasts.List("id,snippet,status,contentDetails").Mine(true).BroadcastType("all").Do())
-
-	if yt.liveVideoIDs != "" {
-		liveVideoIDsArray := strings.Split(yt.liveVideoIDs, ",")
-
-		for _, liveVideoID := range liveVideoIDsArray {
-			yt.Join(liveVideoID)
+	videos, err := yt.GetLiveVideos(yt.me.Id)
+	if err == nil {
+		for _, v := range videos {
+			yt.JoinVideo(v)
 		}
 	}
 
@@ -389,16 +395,30 @@ var messageReplacer = strings.NewReplacer("<", "(", ">", ")")
 
 // SendMessage sends a message.
 func (yt *YouTube) SendMessage(channel, message string) error {
-	yt.InsertChan <- &youtube.LiveChatMessage{
-		Snippet: &youtube.LiveChatMessageSnippet{
-			LiveChatId: channel,
-			Type:       LiveChatMessageSnippetTypeText,
-			TextMessageDetails: &youtube.LiveChatTextMessageDetails{
-				MessageText: messageReplacer.Replace(message),
+	// Send messages of 200 characters.
+	for i := 0; i < len(message); i += 200 {
+		m := i + 200
+		if m > len(message) {
+			m = len(message)
+		}
+
+		me := message[i:m]
+		yt.InsertChan <- &youtube.LiveChatMessage{
+			Snippet: &youtube.LiveChatMessageSnippet{
+				LiveChatId: channel,
+				Type:       LiveChatMessageSnippetTypeText,
+				TextMessageDetails: &youtube.LiveChatTextMessageDetails{
+					MessageText: messageReplacer.Replace(me),
+				},
 			},
-		},
+		}
 	}
 	return nil
+}
+
+// SendAction sends an action.
+func (yt *YouTube) SendAction(channel, message string) error {
+	return yt.SendMessage(channel, message)
 }
 
 // DeleteMessage deletes a message.
@@ -444,48 +464,95 @@ func (yt *YouTube) UserName() string {
 	return yt.me.Snippet.Title
 }
 
+// UserID returns the bots user id.
+func (yt *YouTube) UserID() string {
+	return yt.me.Id
+}
+
 // PrivateMessage will send a private message to a user.
 func (yt *YouTube) PrivateMessage(userID, message string) error {
 	return errors.New("Private messages not supported on YouTube.")
 }
 
-// Join will join a channel.
-func (yt *YouTube) Join(join string) error {
-	if yt.joined[join] {
-		return nil
+// Join will join a video channel.
+func (yt *YouTube) Join(videoID string) error {
+	if yt.joined[videoID] != "" {
+		return ErrAlreadyJoined
 	}
-	yt.joined[join] = true
 
-	videos, err := yt.GetVideosByIDList([]string{join})
-
+	videos, err := yt.GetVideosByIDList([]string{videoID})
 	if err != nil {
-		return errors.New("No live video found.")
+		return errors.New("No video found.")
 	}
 
-	ok := false
-
-	items := []*youtube.LiveBroadcast{}
 	for _, v := range videos {
-		if v.LiveStreamingDetails != nil && v.LiveStreamingDetails.ActiveLiveChatId != "" {
-			items = append(items, &youtube.LiveBroadcast{
-				Snippet: &youtube.LiveBroadcastSnippet{
-					LiveChatId: v.LiveStreamingDetails.ActiveLiveChatId,
-				},
-			})
-			ok = true
+		return yt.JoinVideo(v)
+	}
+
+	return errors.New("No video found.")
+}
+
+// JoinSilent will join a video channel and return a channel of messages.
+// Messages will not be broadcast through the bot.
+func (yt *YouTube) JoinSilent(videoID string) (chan Message, error) {
+	if yt.joined[videoID] != "" {
+		return nil, ErrAlreadyJoined
+	}
+
+	videos, err := yt.GetVideosByIDList([]string{videoID})
+	if err != nil {
+		return nil, errors.New("No video found.")
+	}
+
+	for _, v := range videos {
+		c := make(chan Message, 200)
+		e := yt.joinVideo(v, c)
+		return c, e
+	}
+
+	return nil, errors.New("No video found.")
+}
+
+// JoinVideoAnnounce will join a video like normal, but announce to chat when the bot joins.
+func (yt *YouTube) JoinVideoAnnounce(video *youtube.Video) {
+	err := yt.JoinVideo(video)
+	if err == nil {
+		yt.SendMessage(video.LiveStreamingDetails.ActiveLiveChatId, "I am here!")
+	}
+}
+
+// Leave will leave a video channel.
+func (yt *YouTube) Leave(videoID string) error {
+	delete(yt.joined, videoID)
+
+	return nil
+}
+
+// LeaveAll will leave all the video channels for a channel.
+func (yt *YouTube) LeaveAll(channelID string) error {
+	videos := []string{}
+	for video, channel := range yt.videoToChannel {
+		if channel == channelID {
+			videos = append(videos, video)
 		}
 	}
 
-	if !ok {
-		return errors.New("No live video found.")
+	for _, video := range videos {
+		delete(yt.joined, video)
 	}
-
-	liveBroadcastListResponse := &youtube.LiveBroadcastListResponse{
-		Items: items,
-	}
-	yt.pollBroadcasts(liveBroadcastListResponse, nil)
 
 	return nil
+}
+
+// ChannelIDForVideoID gets a channelID for a video id.
+func (yt *YouTube) ChannelIDForVideoID(videoID string) (channelID string, ok bool) {
+	channelID, ok = yt.videoToChannel[videoID]
+	return
+}
+
+// ChannelName gets a channel name for a channel id.
+func (yt *YouTube) ChannelNameForVideoID(videoID string) string {
+	return yt.videoToChannelName[videoID]
 }
 
 type videoList []*youtube.Video
@@ -539,12 +606,25 @@ func (yt *YouTube) CommandPrefix() string {
 
 // IsBotOwner returns whether or not a message sender was the owner of the bot.
 func (yt *YouTube) IsBotOwner(message Message) bool {
-	return false
+	m, ok := message.(*LiveChatMessage)
+	if !ok {
+		return false
+	}
+	return m.AuthorDetails.ChannelId == "UCGmC0A8mEAPdlELQdP9xJbw"
 }
 
 // IsPrivate returns whether or not a message was private.
 func (yt *YouTube) IsPrivate(message Message) bool {
 	return false
+}
+
+// IsChannelOwner returns whether or not the sender of a message is the owner.
+func (yt *YouTube) IsChannelOwner(message Message) bool {
+	m, ok := message.(*LiveChatMessage)
+	if !ok {
+		return false
+	}
+	return m.AuthorDetails.IsChatOwner
 }
 
 // IsModerator returns whether or not the sender of a message is a moderator.

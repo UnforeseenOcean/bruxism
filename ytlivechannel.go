@@ -13,42 +13,57 @@ import (
 type YTLiveChannel struct {
 	sync.RWMutex
 	service *youtube.Service
+
 	// map channelID -> chan
 	liveVideoChans map[string][]chan *youtube.Video
-	channelNames   map[string]string
+
+	channelNames map[string]string
 }
 
 func NewYTLiveChannel(service *youtube.Service) *YTLiveChannel {
-	return &YTLiveChannel{service: service}
+	return &YTLiveChannel{
+		service:        service,
+		channelNames:   map[string]string{},
+		liveVideoChans: map[string][]chan *youtube.Video{},
+	}
 }
 
+// Monitor monitors a channel for new live videos and sends them down liveVideoChan.
+// If the channel is live when this is called, it will not send the video down the channel.
 func (y *YTLiveChannel) Monitor(channel string, liveVideoChan chan *youtube.Video) error {
 	y.Lock()
 	defer y.Unlock()
 
-	if y.channelNames[channel] == "" {
-		clr, err := y.service.Channels.List("snippet").Id(channel).Do()
-		if err != nil {
-			return errors.New("Error loading channel.")
+	videoChans := y.liveVideoChans[channel]
+	for _, v := range videoChans {
+		if v == liveVideoChan {
+			return errors.New("already monitoring that channel")
 		}
-		if len(clr.Items) != 1 {
-			return errors.New("No channel found.")
-		}
-		if y.channelNames == nil {
-			y.channelNames = map[string]string{}
-		}
-		y.channelNames[channel] = clr.Items[0].Snippet.Title
 	}
 
-	if y.liveVideoChans == nil {
-		y.liveVideoChans = map[string][]chan *youtube.Video{}
-	}
 	created := len(y.liveVideoChans[channel]) == 0
 	y.liveVideoChans[channel] = append(y.liveVideoChans[channel], liveVideoChan)
+
 	if created {
 		go y.poll(channel)
 	}
 	return nil
+}
+
+// UnmonitorAll unmonitors a channel for live videos.
+func (y *YTLiveChannel) Unmonitor(channel string, liveVideoChan chan *youtube.Video) error {
+	y.Lock()
+	defer y.Unlock()
+
+	videoChans := y.liveVideoChans[channel]
+	for i, v := range videoChans {
+		if v == liveVideoChan {
+			y.liveVideoChans[channel] = append(videoChans[:i], videoChans[i+1:]...)
+			return nil
+		}
+	}
+
+	return errors.New("channel not being monitored")
 }
 
 func (y *YTLiveChannel) ChannelName(channel string) string {
@@ -60,30 +75,38 @@ func (y *YTLiveChannel) ChannelName(channel string) string {
 
 func (y *YTLiveChannel) poll(channel string) {
 	var lastAnnounce time.Time
-	seen := map[string]time.Time{}
-	now := time.Now()
+	seen := map[string]bool{}
 	first := true
 	for {
 		videos, _ := y.getLiveVideos(channel)
-		for _, v := range videos {
-			if now.After(seen[v.Id].Add(6 * time.Hour)) {
-				seen[v.Id] = now
+		y.Lock()
+		for k, v := range videos {
+			if !seen[k] {
+				seen[k] = true
+
+				y.channelNames[channel] = v.Snippet.ChannelTitle
+
 				// Don't announce the videos that are already live.
 				if first {
 					continue
 				}
+				now := time.Now()
 				// Don't allow more than 1 announcement per hour.
 				if !now.After(lastAnnounce.Add(1 * time.Hour)) {
 					continue
 				}
 				lastAnnounce = now
-				y.RLock()
+
 				for _, c := range y.liveVideoChans[channel] {
 					c <- v
 				}
-				y.RUnlock()
 			}
 		}
+		if len(y.liveVideoChans[channel]) == 0 {
+			y.Unlock()
+			return
+		}
+		y.Unlock()
 		first = false
 		<-time.After(5 * time.Minute)
 	}

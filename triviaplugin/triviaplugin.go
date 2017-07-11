@@ -20,8 +20,11 @@ type question struct {
 type questions []*question
 
 func (q questions) Question() *question {
-	n := rand.Intn(len(q))
-	return q[n]
+	r := q[rand.Intn(len(q))]
+	if r == nil {
+		return q.Question()
+	}
+	return r
 }
 
 type trivia struct {
@@ -30,8 +33,8 @@ type trivia struct {
 }
 
 func (t *trivia) Question(theme string) *question {
-	q := t.Themes[theme]
-	if q == nil {
+	q, ok := t.Themes[theme]
+	if !ok {
 		q = t.All
 	}
 	return q.Question()
@@ -241,12 +244,12 @@ func (p *triviaPlugin) Save() ([]byte, error) {
 
 // Help returns a list of help strings that are printed when the user requests them.
 func (p *triviaPlugin) Help(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message, detailed bool) []string {
-	if service.IsPrivate(message) || !(service.IsModerator(message) || service.IsBotOwner(message)) {
+	if service.IsPrivate(message) || !service.IsModerator(message) {
 		return nil
 	}
 
 	return []string{
-		bruxism.CommandHelp(service, "trivia", "<start|stop> [theme]", "Starts or stops trivia with an optional theme.")[0],
+		bruxism.CommandHelp(service, "trivia", "<start|stop>", "Starts or stops trivia.")[0],
 		bruxism.CommandHelp(service, "trivia", "<score>", "Returns your current trivia score.")[0],
 	}
 }
@@ -254,76 +257,89 @@ func (p *triviaPlugin) Help(bot *bruxism.Bot, service bruxism.Service, message b
 // Message handler.
 func (p *triviaPlugin) Message(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message) {
 	defer bruxism.MessageRecover()
-	if !service.IsMe(message) && !service.IsPrivate(message) {
-		messageChannel := message.Channel()
 
-		isCommand := bruxism.MatchesCommand(service, "trivia", message)
+	if service.IsMe(message) {
+		return
+	}
 
-		if isCommand && (service.IsModerator(message) || service.IsBotOwner(message)) {
-			p.Lock()
-			tc := p.Channels[messageChannel]
-			if tc == nil {
-				tc = &triviaChannel{
-					Channel: messageChannel,
-					Scores:  map[string]*triviaScore{},
-				}
-				p.Channels[messageChannel] = tc
+	messageChannel := message.Channel()
+
+	isCommand := bruxism.MatchesCommand(service, "trivia", message)
+
+	if isCommand && service.IsPrivate(message) {
+		service.SendMessage(message.Channel(), "Sorry, this command doesn't work in private chat.")
+		return
+	}
+
+	if isCommand && service.IsModerator(message) {
+		p.Lock()
+		tc := p.Channels[messageChannel]
+		if tc == nil {
+			tc = &triviaChannel{
+				Channel: messageChannel,
+				Scores:  map[string]*triviaScore{},
 			}
-			p.Unlock()
+			p.Channels[messageChannel] = tc
+		}
+		p.Unlock()
 
+		_, parts := bruxism.ParseCommand(service, message)
+
+		if len(parts) == 0 {
+			return
+		}
+
+		switch parts[0] {
+		case "start":
+			theme := ""
+			if len(parts) >= 2 {
+				theme = parts[1]
+			}
+			tc.Start(bot, service, theme)
+		case "stop":
+			tc.Stop(bot, service)
+		}
+
+	} else {
+		if isCommand {
 			_, parts := bruxism.ParseCommand(service, message)
-
 			if len(parts) == 0 {
 				return
 			}
+			if parts[0] == "score" {
+				p.RLock()
+				tc := p.Channels[messageChannel]
 
-			switch parts[0] {
-			case "start":
-				theme := ""
-				if len(parts) >= 2 {
-					theme = parts[1]
-				}
-				tc.Start(bot, service, theme)
-			case "stop":
-				tc.Stop(bot, service)
-			}
-
-		} else {
-			if isCommand {
-				_, parts := bruxism.ParseCommand(service, message)
-				if len(parts) == 0 {
-					return
-				}
-				if parts[0] == "score" {
-					p.RLock()
-					tc := p.Channels[messageChannel]
-
-					if tc != nil {
-						ts := tc.Scores[message.UserID()]
-						if ts != nil {
-							service.SendMessage(message.Channel(), fmt.Sprintf("%s's score is %d.", message.UserName(), ts.Score))
-						} else {
-							service.SendMessage(message.Channel(), fmt.Sprintf("%s's score is 0.", message.UserName()))
-						}
+				if tc != nil {
+					ts := tc.Scores[message.UserID()]
+					if ts != nil {
+						service.SendMessage(message.Channel(), fmt.Sprintf("%s's score is %d.", message.UserName(), ts.Score))
+					} else {
+						service.SendMessage(message.Channel(), fmt.Sprintf("%s's score is 0.", message.UserName()))
 					}
-
-					p.RUnlock()
 				}
 
-				return
+				p.RUnlock()
 			}
 
-			p.RLock()
-			tc := p.Channels[messageChannel]
-			p.RUnlock()
-			if tc != nil {
-				tc.Message(bot, service, message)
-			}
+			return
+		}
+
+		p.RLock()
+		tc := p.Channels[messageChannel]
+		p.RUnlock()
+		if tc != nil {
+			tc.Message(bot, service, message)
 		}
 	}
 }
 
-// New will create a new slow mode plugin.
+// Stats will return the stats for a plugin.
+func (p *triviaPlugin) Stats(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message) []string {
+	return nil
+}
+
+// New will create a new trivia plugin.
 func New() bruxism.Plugin {
 	return &triviaPlugin{
 		Channels: map[string]*triviaChannel{},

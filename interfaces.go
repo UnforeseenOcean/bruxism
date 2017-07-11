@@ -36,9 +36,11 @@ var ErrAlreadyJoined = errors.New("Already joined.")
 type Service interface {
 	Name() string
 	UserName() string
+	UserID() string
 	Open() (<-chan Message, error)
 	IsMe(message Message) bool
 	SendMessage(channel, message string) error
+	SendAction(channel, message string) error
 	DeleteMessage(channel, messageID string) error
 	SendFile(channel, name string, r io.Reader) error
 	BanUser(channel, userID string, duration int) error
@@ -48,6 +50,7 @@ type Service interface {
 	PrivateMessage(userID, messageID string) error
 	IsBotOwner(message Message) bool
 	IsPrivate(message Message) bool
+	IsChannelOwner(message Message) bool
 	IsModerator(message Message) bool
 	SupportsPrivateMessages() bool
 	SupportsMultiline() bool
@@ -69,6 +72,9 @@ type HelpFunc func(*Bot, Service, Message, bool) []string
 // MessageFunc is the function signature for a message handler.
 type MessageFunc func(*Bot, Service, Message)
 
+// StatsFunc is the function signature for a stats handler.
+type StatsFunc func(*Bot, Service, Message) []string
+
 // Plugin is a plugin interface, supports loading and saving to a byte array and has help and message handlers.
 type Plugin interface {
 	Name() string
@@ -76,4 +82,5 @@ type Plugin interface {
 	Save() ([]byte, error)
 	Help(*Bot, Service, Message, bool) []string
 	Message(*Bot, Service, Message)
+	Stats(*Bot, Service, Message) []string
 }

@@ -2,11 +2,13 @@ package comicplugin
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"image/png"
 	"log"
 	"math"
 	"math/rand"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,10 +22,28 @@ type comicPlugin struct {
 	sync.Mutex
 
 	bruxism.SimplePlugin
-	log map[string][]bruxism.Message
+	log    map[string][]bruxism.Message
+	Comics int
 }
 
-func (p *comicPlugin) helpFunc(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message, detailed bool) []string {
+// Load will load plugin state from a byte array.
+func (p *comicPlugin) Load(bot *bruxism.Bot, service bruxism.Service, data []byte) error {
+	if data != nil {
+		if err := json.Unmarshal(data, p); err != nil {
+			log.Println("Error loading data", err)
+		}
+	}
+
+	return nil
+}
+
+// Save will save plugin state to a byte array.
+func (p *comicPlugin) Save() ([]byte, error) {
+	return json.Marshal(p)
+}
+
+// Help returns a list of help strings that are printed when the user requests them.
+func (p *comicPlugin) Help(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message, detailed bool) []string {
 	help := bruxism.CommandHelp(service, "comic", "[1-10]", "Creates a comic from recent messages, or a number of messages if provided.")
 
 	ticks := ""
@@ -75,26 +95,35 @@ func makeScriptFromMessages(service bruxism.Service, message bruxism.Message, me
 }
 
 func (p *comicPlugin) makeComic(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message, script *comicgen.Script) {
+	p.Comics++
 	comic := comicgen.NewComicGen("arial", service.Name() != bruxism.DiscordServiceName)
 	image, err := comic.MakeComic(script)
 	if err != nil {
 		service.SendMessage(message.Channel(), fmt.Sprintf("Sorry %s, there was an error creating the comic. %s", message.UserName(), err))
 	} else {
 		go func() {
+			if service.Name() == bruxism.DiscordServiceName {
+				discord := service.(*bruxism.Discord)
+				p, err := discord.UserChannelPermissions(message.UserID(), message.Channel())
+				if err == nil && p&discordgo.PermissionAttachFiles != 0 {
+					b := &bytes.Buffer{}
+					err = png.Encode(b, image)
+					if err != nil {
+						service.SendMessage(message.Channel(), fmt.Sprintf("Sorry %s, there was a problem creating your comic.", message.UserName()))
+						return
+					}
+
+					if err := service.SendFile(message.Channel(), "comic.png", b); err == nil {
+						return
+					}
+				}
+			}
+
 			b := &bytes.Buffer{}
 			err = png.Encode(b, image)
 			if err != nil {
 				service.SendMessage(message.Channel(), fmt.Sprintf("Sorry %s, there was a problem creating your comic.", message.UserName()))
 				return
-			}
-
-			if service.Name() == bruxism.DiscordServiceName {
-				discord := service.(*bruxism.Discord)
-				p, err := discord.UserChannelPermissions(message.UserID(), message.Channel())
-				if err == nil && p&discordgo.PermissionAttachFiles != 0 {
-					service.SendFile(message.Channel(), "comic.png", b)
-					return
-				}
 			}
 
 			url, err := bot.UploadToImgur(b, "comic.png")
@@ -109,11 +138,16 @@ func (p *comicPlugin) makeComic(bot *bruxism.Bot, service bruxism.Service, messa
 			} else {
 				service.SendMessage(message.Channel(), fmt.Sprintf("Here's your comic %s: %s", message.UserName(), url))
 			}
+
+			runtime.GC()
 		}()
 	}
 }
 
-func (p *comicPlugin) messageFunc(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message) {
+// Message handler.
+func (p *comicPlugin) Message(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message) {
+	defer bruxism.MessageRecover()
+
 	if service.IsMe(message) {
 		return
 	}
@@ -139,6 +173,13 @@ func (p *comicPlugin) messageFunc(bot *bruxism.Bot, service bruxism.Service, mes
 		messages := []*comicgen.Message{}
 
 		splits := strings.Split(str, "|")
+		if len(splits) == 0 || (len(splits) == 1 && len(splits[0]) == 0) {
+			service.SendMessage(message.Channel(), fmt.Sprintf("Sorry %s, you didn't add any text.", message.UserName()))
+			return
+		}
+		if len(splits) > 10 {
+			splits = splits[:10]
+		}
 		for _, line := range splits {
 			line := strings.Trim(line, " ")
 
@@ -148,7 +189,7 @@ func (p *comicPlugin) messageFunc(bot *bruxism.Bot, service bruxism.Service, mes
 			if strings.Index(line, ":") != -1 {
 				lineSplit := strings.Split(line, ":")
 
-				author = strings.ToLower(strings.Trim(lineSplit[0], " "))
+				author = strings.Trim(lineSplit[0], " ")
 
 				var err error
 				speaker, err = strconv.Atoi(author)
@@ -156,7 +197,7 @@ func (p *comicPlugin) messageFunc(bot *bruxism.Bot, service bruxism.Service, mes
 					speaker = -1
 				}
 
-				text = strings.Trim(lineSplit[1], " ")
+				text = strings.Trim(strings.Join(lineSplit[1:], ":"), " ")
 			} else {
 				text = line
 			}
@@ -166,11 +207,6 @@ func (p *comicPlugin) messageFunc(bot *bruxism.Bot, service bruxism.Service, mes
 				Text:    text,
 				Author:  author,
 			})
-		}
-
-		if len(messages) == 0 {
-			service.SendMessage(message.Channel(), fmt.Sprintf("Sorry %s, you didn't add any text.", message.UserName()))
-			return
 		}
 
 		p.makeComic(bot, service, message, &comicgen.Script{
@@ -203,7 +239,7 @@ func (p *comicPlugin) messageFunc(bot *bruxism.Bot, service bruxism.Service, mes
 		p.makeComic(bot, service, message, makeScriptFromMessages(service, message, log[len(log)-lines:]))
 	} else {
 		// Don't append commands.
-		if strings.HasPrefix(strings.ToLower(strings.Trim(message.Message(), " ")), strings.ToLower(service.CommandPrefix())) {
+		if bruxism.MatchesCommand(service, "", message) {
 			return
 		}
 
@@ -233,13 +269,19 @@ func (p *comicPlugin) messageFunc(bot *bruxism.Bot, service bruxism.Service, mes
 	}
 }
 
+// Name returns the name of the plugin.
+func (p *comicPlugin) Name() string {
+	return "Comic"
+}
+
+// Stats will return the stats for a plugin.
+func (p *comicPlugin) Stats(bot *bruxism.Bot, service bruxism.Service, message bruxism.Message) []string {
+	return []string{fmt.Sprintf("Comics created: \t%d\n", p.Comics)}
+}
+
 // New will create a new comic plugin.
 func New() bruxism.Plugin {
-	p := &comicPlugin{
-		SimplePlugin: *bruxism.NewSimplePlugin("Comic"),
-		log:          make(map[string][]bruxism.Message),
+	return &comicPlugin{
+		log: make(map[string][]bruxism.Message),
 	}
-	p.MessageFunc = p.messageFunc
-	p.HelpFunc = p.helpFunc
-	return p
 }

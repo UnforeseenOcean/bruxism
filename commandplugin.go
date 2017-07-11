@@ -40,8 +40,8 @@ func MatchesCommandString(service Service, commandString string, private bool, m
 
 // MatchesCommand returns true if a message matches a command.
 func MatchesCommand(service Service, commandString string, message Message) bool {
-	// Only new messages can trigger commands.
-	if message.Type() != MessageTypeCreate {
+	// Deleted messages can't trigger commands.
+	if message.Type() == MessageTypeDelete {
 		return false
 	}
 	return MatchesCommandString(service, commandString, service.IsPrivate(message), message.Message())
@@ -57,12 +57,11 @@ func ParseCommandString(service Service, message string) (string, []string) {
 	if strings.HasPrefix(lowerMessage, lowerPrefix) {
 		message = message[len(lowerPrefix):]
 	}
-	message = strings.TrimSpace(message)
+	rest := strings.Fields(message)
 
-	parts := strings.Split(message, " ")
-	if len(parts) > 1 {
-		rest := parts[1:]
-		return strings.Join(rest, " "), parts[1:]
+	if len(rest) > 1 {
+		rest = rest[1:]
+		return strings.Join(rest, " "), rest
 	}
 	return "", []string{}
 }
@@ -151,6 +150,11 @@ func (p *CommandPlugin) AddCommand(commandString string, message CommandMessageF
 		message: message,
 		help:    help,
 	}
+}
+
+// Stats will return the stats for a plugin.
+func (p *CommandPlugin) Stats(bot *Bot, service Service, message Message) []string {
+	return nil
 }
 
 // NewCommandPlugin will create a new command plugin.
